@@ -1,0 +1,48 @@
+@startuml rfc-a-seq-failover
+title Вариант A. Failover: ACK push не получен -> SMS (с отказом агрегатора A)
+autonumber
+queue "Kafka" as K
+participant "Push Worker" as PW
+participant "Delay\nProcessor" as DP
+database "Redis\nDelivery State" as RS
+participant "SMS Worker" as SW
+participant "SMS-агрегатор A" as A
+participant "SMS-агрегатор B" as B
+participant "Receipt\nGateway" as RG
+participant "Мобильное\nприложение" as APP
+
+PW -> K : delay.10s {N, cursor = 0}
+note over APP : устройство офлайн или уведомления\nотключены в ОС: ACK не приходит
+K -> DP : consume delay.10s (через 10 с)
+DP -> RS : GET delivered:N
+RS --> DP : (nil)
+DP -> RS : SETNX step:N:1
+RS --> DP : OK
+DP -> K : produce ch.sms {N, plan, cursor = 1}
+K -> SW : consume ch.sms
+SW -> RS : GET delivered:N, SETNX attempt:N:1
+SW -> A : submit (client_msg_id = N:1)
+A --> SW : 503 Service Unavailable
+SW -> SW : ретраи исчерпаны,\ncircuit breaker(A) = OPEN
+SW -> B : submit (client_msg_id = N:1)
+B --> SW : 200 OK
+SW -> K : produce delay.60s {N, cursor = 1}
+B -> RG : DLR DELIVRD
+RG -> RS : SET delivered:N = sms
+RG -> K : событие delivered
+
+== Гонка: поздний ACK push ==
+APP -> RG : POST /v1/acks {N}
+RG -> RS : SET delivered:N = push
+note right of RS
+  Если ACK пришёл уже после проверки
+  Delay Processor, SMS всё равно уйдёт:
+  проверка флага и публикация в ch.sms
+  не атомарны. При failover Redis
+  (асинхронная репликация) флаг может
+  потеряться, что тоже даёт лишнюю SMS.
+end note
+K -> DP : consume delay.60s
+DP -> RS : GET delivered:N
+RS --> DP : push (флаг перезаписан поздним ACK), конец
+@enduml

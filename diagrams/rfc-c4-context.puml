@@ -1,0 +1,27 @@
+@startuml rfc-c4-context
+!pragma layout smetana
+!include <C4/C4_Context>
+title Notification Platform: контекст подсистемы гарантированной доставки
+
+Person(client, "Клиент банка")
+System_Ext(producers, "Продуктовые сервисы", "Платежи, переводы, карты, кредиты")
+System(np, "Notification Platform", "Приём, маршрутизация, гарантированная доставка, статусы")
+System_Ext(profile, "Customer Profile", "Контакты клиента")
+System_Ext(app, "Мобильное приложение банка", "Получает push, отправляет ACK")
+System_Ext(push, "Push-провайдеры", "FCM, APNs, HMS, RuStore")
+System_Ext(sms, "SMS-агрегаторы A и B", "HTTP / SMPP")
+System_Ext(mail, "Email relay", "SMTP")
+System_Ext(support, "Поддержка и комплаенс", "Разбор обращений, аудит")
+
+Rel(producers, np, "События для уведомления", "gRPC / Kafka")
+Rel(np, profile, "Контакты", "REST")
+Rel(np, push, "Push")
+Rel(np, sms, "SMS")
+Rel(np, mail, "Email", "SMTP")
+Rel(push, app, "Push")
+Rel(app, np, "ACK получения", "HTTPS")
+Rel(sms, client, "SMS")
+Rel(mail, client, "Email")
+Rel(client, app, "Пользуется")
+Rel(support, np, "Статус и история")
+@enduml

@@ -1,0 +1,52 @@
+@startuml rfc-a-c4-container
+!pragma layout smetana
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+title Вариант A. Хореография на Kafka (C4: Container)
+
+System_Ext(producers, "Продуктовые сервисы", "Платежи, переводы, карты")
+System_Ext(app, "Мобильное приложение", "iOS / Android, отправляет ACK")
+System_Ext(pushp, "Push-провайдеры", "FCM, APNs, HMS, RuStore")
+System_Ext(smsp, "SMS-агрегаторы A и B", "HTTP / SMPP")
+System_Ext(mailp, "Email relay", "SMTP")
+
+System_Boundary(np, "Notification Platform: гарантированная доставка (вариант A)") {
+  Container(ingest, "Ingest API", "Go, gRPC", "Приём, авторизация отправителя, запись в Kafka")
+  ContainerQueue(kafka, "Event Bus", "Apache Kafka, RF=3", "notif.critical, ch.push, ch.sms, ch.email, delay.10s, delay.60s, retry.*, dlq.*, notification.events")
+  Container(router, "Router", "Go", "Дедупликация на входе, план каналов, публикация в топик первого канала")
+  Container(pushw, "Push Worker", "Go", "Отправка push; ошибка -> следующий канал; проверка -> delay.10s")
+  Container(smsw, "SMS Worker", "Go", "Отправка SMS, переключение агрегаторов; проверка -> delay.60s")
+  Container(emailw, "Email Worker", "Go", "Отправка email (последний шаг)")
+  Container(delay, "Delay Processor", "Go", "Ждёт due_time, проверяет флаг доставки, публикует следующий канал")
+  Container(receipts, "Receipt Gateway", "Go, HTTP", "ACK приложения, DLR агрегаторов")
+  ContainerDb(redis, "Delivery State", "Redis Cluster, AOF", "Флаги delivered, ключи дедупликации, кэш профилей")
+  Container(pref, "Preference & Device Service", "Go", "Настройки, устройства, контакты")
+  Container(status, "Status Service", "Go", "Сборка истории из событий, API статуса")
+  ContainerDb(ch, "History & Audit", "ClickHouse", "События доставки, 3 года")
+}
+
+Rel(producers, ingest, "SendNotification", "gRPC, mTLS")
+Rel(ingest, kafka, "notif.critical", "acks=all")
+Rel(kafka, router, "notif.critical")
+Rel(router, pref, "Профиль", "gRPC")
+Rel(router, redis, "SETNX notif:id")
+Rel(router, kafka, "ch.* (первый канал плана)")
+Rel(kafka, pushw, "ch.push")
+Rel(kafka, smsw, "ch.sms")
+Rel(kafka, emailw, "ch.email")
+Rel(kafka, delay, "delay.10s, delay.60s")
+Rel(pushw, pushp, "Push", "HTTP/2")
+Rel(smsw, smsp, "SMS", "HTTPS / SMPP")
+Rel(emailw, mailp, "Email", "SMTP")
+Rel(pushw, kafka, "delay.10s, ch.sms, события")
+Rel(smsw, kafka, "delay.60s, ch.email, события")
+Rel(delay, redis, "GET delivered:id")
+Rel(delay, kafka, "ch.* (следующий канал плана)")
+Rel(pushp, app, "Push")
+Rel(app, receipts, "ACK", "HTTPS")
+Rel(smsp, receipts, "DLR", "HTTPS webhook")
+Rel(receipts, redis, "SET delivered:id")
+Rel(receipts, kafka, "notification.events")
+Rel(kafka, status, "notification.events")
+Rel(status, ch, "История")
+@enduml

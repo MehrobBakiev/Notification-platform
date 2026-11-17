@@ -1,0 +1,38 @@
+@startuml rfc-a-seq-main
+title Вариант A. Основной сценарий: push доставлен
+autonumber
+participant "Payments\nService" as P
+participant "Ingest API" as I
+queue "Kafka" as K
+participant "Router" as R
+database "Redis\nDelivery State" as RS
+participant "Push Worker" as PW
+participant "FCM / APNs" as FCM
+participant "Мобильное\nприложение" as APP
+participant "Receipt\nGateway" as RG
+participant "Delay\nProcessor" as DP
+
+P -> I : Send(idempotency_key, user_id,\nTRANSACTIONAL, card.debit.v3, params)
+I -> K : produce notif.critical (acks = all)
+I --> P : 202 Accepted (notification_id)
+K -> R : consume notif.critical
+R -> RS : SETNX notif:N (TTL 72 ч)
+RS --> R : OK (новое уведомление)
+R -> R : план [push 10 с, sms 60 с, email]\n(профиль из кэша)
+R -> K : produce ch.push {N, plan, cursor = 0}
+K -> PW : consume ch.push
+PW -> RS : SETNX attempt:N:0
+PW -> FCM : send (collapse_key = N, ttl = 1 ч)
+FCM --> PW : 200 OK (принято провайдером)
+PW -> K : produce delay.10s {N, cursor = 0, due = now + 10 с}
+PW -> K : событие push_accepted
+FCM -> APP : push
+APP -> RG : POST /v1/acks {N, ack_token, displayed = true}
+RG -> RS : SET delivered:N = push
+RG -> K : событие delivered
+K -> DP : consume delay.10s
+DP -> DP : ждёт до due (≈ 10 с)
+DP -> RS : GET delivered:N
+RS --> DP : push
+DP -> DP : доставлено, проверка завершена
+@enduml

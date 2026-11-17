@@ -1,0 +1,1049 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Notification Platform — демонстрация гарантированной обработки",
+    "version": "1.0.0",
+    "description": "Локальный стенд для защиты архитектурного задания. Использует реальное ядро оркестратора и SMS Sender, транзакционное хранилище в памяти и имитацию внешних провайдеров. Внешних SMS/push/email нет. Данные исчезают при перезапуске. Термин «гарантированная доставка» имеет условия: at-least-once обработка, восстановление попыток и failover; абсолютная доставка и отсутствие межканальных дублей при внешних сбоях не обещаются.\n\nНачните с готовых сценариев. Для ручного показа: создать → advance → GET статуса → поздний ACK → replay. Все длительности HTTP API заданы в секундах."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Текущий локальный сервер"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Сценарии защиты"
+    },
+    {
+      "name": "Уведомления"
+    },
+    {
+      "name": "Управление демо"
+    },
+    {
+      "name": "Сервис"
+    }
+  ],
+  "paths": {
+    "/api/demo/scenarios/{name}": {
+      "post": {
+        "operationId": "runScenario",
+        "summary": "Запустить готовый сценарий защиты",
+        "tags": [
+          "Сценарии защиты"
+        ],
+        "description": "Создаёт новое уведомление и выполняет сценарий целиком. push-success → DELIVERED/push; failover → DELIVERED/sms через агрегатор B; late-ack → межканальный дубль в аудите; retry → два временных сбоя, одна SMS; expired → EXPIRED без SMS; all-failed → FAILED; email-only → SENT. Время общее для всех уведомлений: failover/late-ack продвигают его на 10 с, retry на 2 с, expired на 5 с. Сравните commands, events и provider_submissions.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "push-success",
+                "failover",
+                "late-ack",
+                "retry",
+                "expired",
+                "all-failed",
+                "email-only"
+              ],
+              "default": "failover"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный сценарий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Достигнут лимит локального демо",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications": {
+      "post": {
+        "operationId": "createNotification",
+        "summary": "Принять уведомление",
+        "tags": [
+          "Уведомления"
+        ],
+        "description": "Запускает первый шаг через ядро delivery. Демо сразу обрабатывает доступные команды. Для failover вызовите advance на 10 с. Повторите тот же запрос для проверки идемпотентности.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRequest"
+              },
+              "examples": {
+                "manual": {
+                  "summary": "Ручной failover: push без ACK → через 10 с SMS",
+                  "value": {
+                    "idempotency_key": "defense-manual-001",
+                    "user_id": 42,
+                    "category": "TRANSACTIONAL",
+                    "ttl_seconds": 3600,
+                    "profile": {
+                      "preferred_channel": "push",
+                      "push_ready": true,
+                      "has_phone": true,
+                      "has_email": true
+                    },
+                    "simulation": {
+                      "push": "silent",
+                      "sms": "delivered",
+                      "sms_primary_down": true
+                    }
+                  }
+                },
+                "push": {
+                  "summary": "Push с немедленным ACK",
+                  "value": {
+                    "idempotency_key": "defense-push-001",
+                    "user_id": 42,
+                    "simulation": {
+                      "push": "ack"
+                    }
+                  }
+                },
+                "sms-retry": {
+                  "summary": "SMS: сбой контактов и публикации результата по одному разу",
+                  "value": {
+                    "idempotency_key": "defense-retry-001",
+                    "user_id": 42,
+                    "profile": {
+                      "has_phone": true
+                    },
+                    "simulation": {
+                      "contact_error_once": true,
+                      "receipt_error_once": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Создано; Location содержит URL статуса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Идемпотентный повтор",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный ввод",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ключ занят другим запросом или достигнут лимит демо",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listNotifications",
+        "summary": "Список уведомлений",
+        "tags": [
+          "Уведомления"
+        ],
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Notification"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/{id}": {
+      "get": {
+        "operationId": "getNotification",
+        "summary": "Статус и полный журнал доставки",
+        "tags": [
+          "Уведомления"
+        ],
+        "description": "",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID из notification.id предыдущего ответа"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Уведомление не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/{id}/receipts": {
+      "post": {
+        "operationId": "recordReceipt",
+        "summary": "Имитировать ACK приложения / DLR оператора",
+        "tags": [
+          "Уведомления"
+        ],
+        "description": "Принимаются только запущенные шаги с соответствующим каналом. Повтор receipt не создаёт новые события. DELIVERED по email не поддерживается. Поздний ACK push после SMS создаёт cross_channel_duplicate. Это локальный имитатор Receipt Gateway; production требует проверки подписи и принадлежности попытки.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID из notification.id предыдущего ответа"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiptRequest"
+              },
+              "examples": {
+                "push-ack": {
+                  "value": {
+                    "step_idx": 0,
+                    "channel": "push",
+                    "status": "DELIVERED"
+                  }
+                },
+                "sms-dlr": {
+                  "value": {
+                    "step_idx": 1,
+                    "channel": "sms",
+                    "status": "DELIVERED"
+                  }
+                },
+                "failure": {
+                  "value": {
+                    "step_idx": 0,
+                    "channel": "push",
+                    "status": "FAILED",
+                    "reason": "UNREGISTERED"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестная попытка, канал или статус",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Уведомление не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/{id}/replay": {
+      "post": {
+        "operationId": "replayCommand",
+        "summary": "Повторить последнюю команду отправки",
+        "tags": [
+          "Уведомления"
+        ],
+        "description": "Имитирует повторную доставку команды из брокера. Завершённый результат SMS переиздаётся без повторной отправки. Для SENDING/sms с simulation.sms=silent удобно убедиться, что число provider_submissions не растёт.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID из notification.id предыдущего ответа"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Нет команды для повтора",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Уведомление не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/demo/advance": {
+      "post": {
+        "operationId": "advanceClock",
+        "summary": "Продвинуть виртуальное время",
+        "tags": [
+          "Управление демо"
+        ],
+        "description": "Обрабатывает таймеры и повторные команды в хронологическом порядке. Само течение реального времени состояние не меняет. Push timeout: 10 с (SECURITY: 5 с), SMS DLR timeout: 60 с. Действует на весь стенд.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400
+                  }
+                },
+                "required": [
+                  "seconds"
+                ],
+                "additionalProperties": false
+              },
+              "examples": {
+                "push-timeout": {
+                  "value": {
+                    "seconds": 10
+                  }
+                },
+                "sms-timeout": {
+                  "value": {
+                    "seconds": 60
+                  }
+                },
+                "retry": {
+                  "value": {
+                    "seconds": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный интервал",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/demo": {
+      "get": {
+        "operationId": "getDemo",
+        "summary": "Общее состояние стенда",
+        "tags": [
+          "Управление демо"
+        ],
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "resetDemo",
+        "summary": "Сбросить демо",
+        "tags": [
+          "Управление демо"
+        ],
+        "description": "Удаляет все локальные уведомления, попытки, команды, события и метрики; возвращает виртуальные часы к текущему времени. Используйте перед показом.",
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "summary": "Проверить доступность",
+        "tags": [
+          "Сервис"
+        ],
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Успешно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "mode": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "summary": "Метрики в формате Prometheus",
+        "tags": [
+          "Сервис"
+        ],
+        "description": "Состояния, принятые имитаторами отправки, подтверждённые межканальные дубли и команды на повторе. Это метрики демо, они обнуляются при сбросе.",
+        "responses": {
+          "200": {
+            "description": "Prometheus text exposition",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "preferred_channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms"
+            ],
+            "default": "push"
+          },
+          "push_ready": {
+            "type": "boolean"
+          },
+          "push_unreliable": {
+            "type": "boolean"
+          },
+          "has_phone": {
+            "type": "boolean"
+          },
+          "has_email": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Simulation": {
+        "type": "object",
+        "properties": {
+          "push": {
+            "type": "string",
+            "enum": [
+              "ack",
+              "silent",
+              "fail"
+            ],
+            "default": "silent"
+          },
+          "sms": {
+            "type": "string",
+            "enum": [
+              "delivered",
+              "silent",
+              "fail",
+              "unknown_once"
+            ],
+            "default": "delivered"
+          },
+          "email": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "fail"
+            ],
+            "default": "accepted"
+          },
+          "sms_primary_down": {
+            "type": "boolean",
+            "default": false
+          },
+          "contact_error_once": {
+            "type": "boolean",
+            "default": false
+          },
+          "receipt_error_once": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "Только демо: ACK push; отсутствие ACK; отказ; SMS с DLR или без; неизвестный исход SMS (провайдер принял, ответ потерян, повтор через аренду с тем же ID). Никаких внешних отправок."
+      },
+      "CreateRequest": {
+        "type": "object",
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "TRANSACTIONAL",
+              "SECURITY"
+            ],
+            "default": "TRANSACTIONAL"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/Profile"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 3600
+          },
+          "simulation": {
+            "$ref": "#/components/schemas/Simulation"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "user_id"
+        ],
+        "additionalProperties": false,
+        "description": "Без profile доступны push, SMS и email. При явном profile все неуказанные boolean-поля равны false. Критичные категории отключать нельзя. Повтор того же нормализованного тела возвращает прежний ID; другой запрос с тем же ключом — 409. ttl_seconds=0 трактуется как значение по умолчанию."
+      },
+      "Step": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "ack_timeout_seconds": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "channel",
+          "ack_timeout_seconds"
+        ],
+        "additionalProperties": false
+      },
+      "Notification": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "TRANSACTIONAL",
+              "SECURITY"
+            ]
+          },
+          "plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            }
+          },
+          "step_idx": {
+            "type": "integer",
+            "minimum": -1
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "SENDING",
+              "DELIVERED",
+              "SENT",
+              "FAILED",
+              "EXPIRED"
+            ]
+          },
+          "delivered_via": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "category",
+          "plan",
+          "step_idx",
+          "state",
+          "created_at",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "description": "DELIVERED: получен ACK/DLR; SENT: email принят без подтверждения доставки; FAILED: план исчерпан; EXPIRED: TTL. step_idx=-1: ни один шаг не запускался. Поздние подтверждения после завершения отражаются в events, статус завершённой обработки сохраняется."
+      },
+      "Command": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "step_idx": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "attempt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "notification_id",
+          "user_id",
+          "step_idx",
+          "channel",
+          "expires_at",
+          "attempt_id"
+        ],
+        "additionalProperties": false
+      },
+      "Event": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "notification_id",
+          "type",
+          "at"
+        ],
+        "additionalProperties": false
+      },
+      "Timer": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "string"
+          },
+          "step_idx": {
+            "type": "integer"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "notification_id",
+          "step_idx",
+          "fire_at"
+        ],
+        "additionalProperties": false
+      },
+      "Submission": {
+        "type": "object",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "channel",
+          "provider",
+          "at"
+        ],
+        "additionalProperties": false
+      },
+      "Snapshot": {
+        "type": "object",
+        "properties": {
+          "now": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "notification": {
+            "$ref": "#/components/schemas/Notification"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Command"
+            }
+          },
+          "timers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Timer"
+            }
+          },
+          "provider_submissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Submission"
+            }
+          },
+          "pending_retries": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "now",
+          "notification",
+          "events",
+          "commands",
+          "timers",
+          "provider_submissions",
+          "pending_retries"
+        ],
+        "additionalProperties": false
+      },
+      "Overview": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "now": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Notification"
+            }
+          },
+          "states": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "timers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Timer"
+            }
+          },
+          "pending_commands": {
+            "type": "integer"
+          },
+          "provider_submissions": {
+            "type": "integer"
+          },
+          "cross_channel_duplicates": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mode",
+          "now",
+          "notifications",
+          "states",
+          "timers",
+          "pending_commands",
+          "provider_submissions",
+          "cross_channel_duplicates"
+        ],
+        "additionalProperties": false
+      },
+      "ReceiptRequest": {
+        "type": "object",
+        "properties": {
+          "step_idx": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "sms",
+              "email"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACCEPTED",
+              "DELIVERED",
+              "FAILED"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_idx",
+          "channel",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

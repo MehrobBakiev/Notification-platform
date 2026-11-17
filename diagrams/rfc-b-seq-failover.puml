@@ -1,0 +1,55 @@
+@startuml rfc-b-seq-failover
+title Вариант B. Failover: ACK push не получен -> SMS (с отказом агрегатора A)
+autonumber
+queue "Kafka" as K
+participant "Delivery\nOrchestrator" as O
+database "PostgreSQL\nDelivery State" as DB
+participant "Push Sender" as PS
+participant "FCM / APNs" as FCM
+participant "SMS Sender" as SS
+participant "SMS-агрегатор A" as A
+participant "SMS-агрегатор B" as B
+participant "Receipt\nGateway" as RG
+participant "Мобильное\nприложение" as APP
+
+== Шаг 0: push ==
+K -> PS : cmd.push {N:0}
+PS -> FCM : send
+FCM --> PS : 200 OK (принято, доставка не подтверждена)
+PS -> K : delivery.receipts {N:0, ACCEPTED}
+note over APP : устройство офлайн или уведомления\nотключены в ОС: ACK не приходит
+
+== Таймер шага 0 истёк (t0 + 10 с) ==
+O -> DB : BEGIN\nSELECT due notifications FOR UPDATE SKIP LOCKED\n(порядок по notification_id)
+O -> DB : заблокировать/удалить актуальный timer\n(SENDING, step_idx = 0, TTL ещё действует)
+O -> DB : step_idx = 1\nINSERT delivery_timers (шаг 1, now + 60 с)\nINSERT outbox (cmd.sms N:1, failover)\nCOMMIT
+O -> K : publish cmd.sms {attempt_id = N:1}
+
+== Шаг 1: SMS ==
+K -> SS : consume cmd.sms
+SS -> DB : SELECT state, step_idx (по PK)
+DB --> SS : SENDING, 1: команда актуальна
+SS -> DB : Claim attempt N:1 (owner, lease = 30 с)\nесли busy: retry; если completed: переиздать receipt
+SS -> A : submit (client_msg_id = N:1)
+A --> SS : 503 Service Unavailable
+SS -> SS : ретраи с backoff исчерпаны,\ncircuit breaker(A) = OPEN
+SS -> B : submit (client_msg_id = N:1)
+B --> SS : 200 OK (provider_msg_id)
+SS -> DB : сохранить результат попытки и receipt outbox\nс проверкой owner
+SS -> K : publish delivery.receipts {N:1, ACCEPTED, provider = B}\nсбой публикации: переиздать сохранённый результат
+B -> RG : DLR (DELIVRD)
+RG -> K : delivery.receipts {N:1, DELIVERED}
+K -> O : consume
+O -> DB : BEGIN\nlock notification, remember receipt\nstate = DELIVERED, via = sms\nDELETE delivery_timers, INSERT outbox (delivered)\nCOMMIT
+
+== Поздний ACK push ==
+APP -> RG : POST /v1/acks {N}
+RG -> K : delivery.receipts {N:0, DELIVERED}
+K -> O : consume
+O -> DB : state уже DELIVERED: только событие\ncross_channel_duplicate (один раз по receipt)
+note over SS, APP
+  ACK между проверкой состояния и submit SMS
+  всё ещё может привести к доставке по двум каналам.
+  Транзакция БД не охватывает внешний HTTP-вызов.
+end note
+@enduml

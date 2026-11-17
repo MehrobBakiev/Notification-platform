@@ -1,0 +1,25 @@
+@startuml rfc-state-machine
+!pragma layout smetana
+title Жизненный цикл критичного уведомления
+hide empty description
+
+[*] --> SENDING : принято (дедуп по notification_id),\nплан построен, команда шага 0 в outbox
+SENDING --> SENDING : таймаут шага / ошибка канала\n[есть следующий шаг]\nstep_idx++, новая команда и таймер
+SENDING --> DELIVERED : ACK приложения или DLR DELIVRD\nпо любому шагу
+SENDING --> SENT : email принят провайдером\n(подтверждение невозможно)
+SENDING --> FAILED : шаги плана исчерпаны
+SENDING --> EXPIRED : истёк TTL\nтаймер шага ограничен expires_at
+DELIVERED --> [*]
+SENT --> [*]
+FAILED --> [*] : алерт, событие отправителю,\nразбор исходов перед новым запросом
+EXPIRED --> [*]
+
+note right of DELIVERED
+  Поздний ACK по другому каналу
+  после DELIVERED фиксируется событием
+  cross_channel_duplicate.
+  Replay того же receipt не создаёт событие снова.
+  Поздние ACK после FAILED / EXPIRED / SENT
+  сохраняются как late_delivery без новых отправок.
+end note
+@enduml

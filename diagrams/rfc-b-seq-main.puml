@@ -1,0 +1,37 @@
+@startuml rfc-b-seq-main
+title Вариант B. Основной сценарий: push доставлен
+autonumber
+participant "Payments\nService" as P
+participant "Ingest API" as I
+queue "Kafka" as K
+participant "Delivery\nOrchestrator" as O
+database "PostgreSQL\nDelivery State" as DB
+participant "Preference &\nDevice Service" as PR
+participant "Push Sender" as PS
+participant "FCM / APNs" as FCM
+participant "Мобильное\nприложение" as APP
+participant "Receipt\nGateway" as RG
+
+P -> I : Send(idempotency_key, user_id,\nTRANSACTIONAL, card.debit.v3, params)
+I -> I : notification_id N = UUIDv5(producer, key)
+I -> K : produce notif.critical\n(key = N, acks = all)
+I --> P : 202 Accepted (N)
+K -> O : consume notif.critical
+O -> PR : GetProfile(user_id)
+PR --> O : настройки, устройства (из кэша Redis)
+O -> O : BuildPlan: [push 10 с, sms 60 с, email]
+O -> DB : BEGIN\nINSERT notifications ON CONFLICT (id) DO NOTHING\nINSERT delivery_timers (шаг 0, now + 10 с)\nINSERT outbox (cmd.push, step_started)\nCOMMIT
+O -> K : publish cmd.push {attempt_id = N:0}
+O -> DB : DELETE outbox (опубликовано)
+K -> PS : consume cmd.push
+PS -> FCM : send (collapse_key = N, ttl ≤ expires_at - now,\ndata: N, ack_token)
+FCM --> PS : 200 OK (message_id)
+PS -> K : delivery.receipts {N:0, ACCEPTED}
+FCM -> APP : push
+APP -> APP : показать уведомление\n(дедуп по N)
+APP -> RG : POST /v1/acks {N, ack_token, displayed = true}
+RG -> RG : проверка HMAC ack_token
+RG -> K : delivery.receipts {N:0, DELIVERED}
+K -> O : consume delivery.receipts
+O -> DB : BEGIN\nSELECT notification FOR UPDATE\nvalidate attempt, remember receipt\nstate = DELIVERED, via = push\nDELETE delivery_timers\nINSERT outbox (delivered)\nCOMMIT
+@enduml
